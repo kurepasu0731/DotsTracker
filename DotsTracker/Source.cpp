@@ -7,6 +7,7 @@
 #include <flann/flann.hpp>
 #include <boost/shared_array.hpp>
 
+#include <math.h>
 #include <atltime.h>
 
 #define CAMERA_WIDTH 1920
@@ -16,6 +17,8 @@
 #define A_THRESH_VAL -5
 #define DOT_THRESH_VAL_MIN 100  // ドットノイズ弾き
 #define DOT_THRESH_VAL_MAX 500 // エッジノイズ弾き
+
+#define THRESH 20
 
 void calCoG_dot_v0(cv::Mat &src, cv::Point& sum, int& cnt, cv::Point& min, cv::Point& max, cv::Point p) 
 {
@@ -66,19 +69,19 @@ bool init_v0(cv::Mat &src, std::vector<cv::Point2f> &dots)
 		cv::circle(ptsImg, *it, 3, color, 2);
 	}
 
-	cv::Mat resize_src, resize_pts;
-	cv::resize(origSrc, resize_src, cv::Size(), 0.5, 0.5);
-	cv::resize(ptsImg, resize_pts, cv::Size(), 0.5, 0.5);
+	//cv::Mat resize_src, resize_pts;
+	//cv::resize(origSrc, resize_src, cv::Size(), 0.5, 0.5);
+	//cv::resize(ptsImg, resize_pts, cv::Size(), 0.5, 0.5);
 
-	cv::imshow("src", resize_src);
-	cv::imshow("result", resize_pts);
+	//cv::imshow("src", resize_src);
+	//cv::imshow("result", resize_pts);
 
 	return k;
 }
 
 
 //前フレームの点と現フレームの点の対応付け(currがprevの点の順に並んでくる)
-void Correspond(const std::vector<cv::Point2f> &prev, std::vector<cv::Point2f> &curr)
+void Correspond(const std::vector<cv::Point2f> &prev, const std::vector<cv::Point2f> &curr, std::vector<cv::Point2f> &track)
 {
 	//X: curr Y:prev
 
@@ -120,7 +123,7 @@ void Correspond(const std::vector<cv::Point2f> &prev, std::vector<cv::Point2f> &
 		sortedCurr.emplace_back(curr[indices[i][0]]);
 	}
 
-	curr = sortedCurr;
+	track = sortedCurr;
 
 }
 
@@ -158,6 +161,7 @@ int main(int argc, char** argv)
 
         cv::Mat currFrameGray;
         std::vector<cv::Point2f> currCorners;
+        std::vector<cv::Point2f> trackedCorners; //prevの順にならびかえたやつ
 
 		//gray画像に変換
         cv::cvtColor(frame, currFrameGray, CV_BGR2GRAY);
@@ -168,114 +172,50 @@ int main(int argc, char** argv)
 		if(!refresh)
 		{
 			//前フレームとの対応付け(prevCornersをcurrCornersに対応付ける)
-			Correspond(prevCorners, currCorners);
-		}
-		//表示
-		color = refresh ? red : blue;
-		for(int i = 0; i < currCorners.size(); i++)
-		{
-			cv::Point p = cv::Point((int) currCorners[i].x, (int) currCorners[i].y);
-			cv::putText(drawframe,std::to_string(i), p, cv::FONT_HERSHEY_SIMPLEX, 0.7, color);
-			cv::circle(drawframe, p, 1, color, 2);
-		}
-		cv::imshow("preview", drawframe);
+			Correspond(prevCorners, currCorners, trackedCorners);
 
-		int key = cv::waitKey(cycle);
-		if (key == 27) break;
-		else if(key == 32){
-			refresh = !refresh;
-		}
-
-		prevCorners = currCorners;
-
-//コーナー点の検出とトラッキング
-#if 0
-        // 特徴点抽出
-
-        std::vector<uchar> featuresFound;
-        std::vector<float> featuresErrors;
-
-		if(refresh){
-			//ドット検出
-		}else{
-		    cTimeStart = CFileTime::GetCurrentTime();           // 現在時刻
-			cv::calcOpticalFlowPyrLK(
-				prevFrameGray,
-				currFrameGray,
-				prevCorners,
-				currCorners,
-				featuresFound,
-				featuresErrors);
-			cTimeEnd = CFileTime::GetCurrentTime();           // 現在時刻
-			cTimeSpan = cTimeEnd - cTimeStart;
-			std::cout<< cTimeSpan.GetTimeSpan()/10000 << "[ms]" << std::endl;
-		}
-        for (int i = 0; i < currCorners.size(); i++) {
-            cv::Point p2 = cv::Point((int) currCorners[i].x, (int) currCorners[i].y);
-			if(refresh)	{
-				cv::putText(drawframe,std::to_string(i), cv::Point((int) currCorners[i].x, (int) currCorners[i].y), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0,0,255));
-				cv::circle(drawframe, p2, 1, cv::Scalar(0,0,255), 2);
-			}else{
-				if(featuresErrors[i] <= 30.0f) //画面外に飛び出てる
+			//prevと閾値以上離れてたら削除
+			std::vector<cv::Point2f> trackedCorners_erase;
+			for(int i = 0; i < trackedCorners.size(); i++)
+			{
+				if(sqrt(pow((prevCorners[i].x - trackedCorners[i].x), 2) + pow((prevCorners[i].y - trackedCorners[i].y), 2)) < THRESH)
 				{
-				cv::putText(drawframe,std::to_string(i), cv::Point((int) currCorners[i].x, (int) currCorners[i].y), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255,0,0));
-				cv::circle(drawframe, p2, 3, cv::Scalar(255,0,0), 2);
-
+					trackedCorners_erase.emplace_back(trackedCorners[i]);
 				}
 			}
-        }
 
-
-		//コーナー検出結果表示
-		cv::Mat resize_cam;
-		cv::resize(drawframe, resize_cam, cv::Size(), 0.8, 0.8);
-		cv::imshow("preview", drawframe);
-        prevFrame = frame;
-		prevCorners = currCorners;
-
+			std::vector<cv::Point2f> trackedCorners_new = trackedCorners_erase;
+			//currCornersでまだ対応ついてない点を新規登録
+			for(int i = 0; i < currCorners.size(); i++)
+			{
+				std::vector< cv::Point2f >::iterator cIter = find( trackedCorners_erase.begin(), trackedCorners_erase.end(), currCorners[i]);
+				if( cIter == trackedCorners_erase.end())
+				{
+					trackedCorners_new.emplace_back(currCorners[i]);
+				}
+			}
+			//表示
+			color = refresh ? red : blue;
+			for(int i = 0; i < trackedCorners_new.size(); i++)
+			{
+				cv::Point p = cv::Point((int) trackedCorners_new[i].x, (int) trackedCorners_new[i].y);
+				cv::putText(drawframe,std::to_string(i), p, cv::FONT_HERSHEY_SIMPLEX, 0.7, color);
+				cv::circle(drawframe, p, 1, color, 2);
+			}
+			prevCorners = trackedCorners_new;
+		}
+		else
+		{
+			prevCorners = currCorners;
+		}
 		int key = cv::waitKey(cycle);
-
 		if (key == 27) break;
-		else if(key == 32){
+		else if(key == 32){ 
 			refresh = !refresh;
 		}
-#endif
 
-#if 0
+		cv::imshow("preview", drawframe);
 
-        // 特徴点抽出
-        std::vector<cv::Point2f> prevCorners;
-        std::vector<cv::Point2f> currCorners;
-
-        cv::goodFeaturesToTrack(prevFrameGray, prevCorners, 20, 0.05, 5.0);
-        cv::goodFeaturesToTrack(currFrameGray, currCorners, 20, 0.05, 5.0);
-        cv::cornerSubPix(prevFrameGray, prevCorners, cv::Size(21, 21), cv::Size(-1, -1), cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 30, 0.01));
-        cv::cornerSubPix(currFrameGray, currCorners, cv::Size(21, 21), cv::Size(-1, -1), cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 30, 0.01));
-
-        std::vector<uchar> featuresFound;
-        std::vector<float> featuresErrors;
-
-        cv::calcOpticalFlowPyrLK(
-            prevFrameGray,
-            currFrameGray,
-            prevCorners,
-            currCorners,
-            featuresFound,
-            featuresErrors);
-
-        for (int i = 0; i < featuresFound.size(); i++) {
-            cv::Point p1 = cv::Point((int) prevCorners[i].x, (int) prevCorners[i].y);
-            cv::Point p2 = cv::Point((int) currCorners[i].x, (int) currCorners[i].y);
-
-			//cv::putText(drawframe,std::to_string(i), cv::Point((int) currCorners[i].x, (int) currCorners[i].y), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255,0,0));
-			//cv::circle(drawframe, p2, 3, cv::Scalar(255,0,0), 2);
-            cv::line(drawframe, p1, p2, cv::Scalar(0, 0, 255), 2);
-        }
-
-        cv::imshow("preview", drawframe);
-        prevFrame = frame;
-        if (cv::waitKey(cycle) == 27) { break; }
-#endif
 		cTimeEnd = CFileTime::GetCurrentTime();           // 現在時刻
 		cTimeSpan = cTimeEnd - cTimeStart;
 		std::cout<< cTimeSpan.GetTimeSpan()/10000 << "[ms]" << std::endl;
